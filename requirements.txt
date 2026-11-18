@@ -1,0 +1,8 @@
+streamlit
+osmnx
+networkx
+folium
+numpy
+pandas
+scikit-learn
+ortools

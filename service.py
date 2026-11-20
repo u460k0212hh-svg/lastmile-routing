@@ -63,7 +63,7 @@ def upload_scenario(G, adj, depot, df):
            if haversine(y, x, G.nodes[n]["y"], G.nodes[n]["x"]) > MAX_SNAP_M]
     if far:
         raise ValueError(f"도로망에서 {MAX_SNAP_M}m 넘게 떨어진 좌표가 있습니다 (CSV {far[:10]}번째 행). "
-                         "미추홀구 안의 좌표인지 확인하세요")
+                         "선택한 지역 안의 좌표인지 확인하세요")
     nodes = [depot] + [int(x) for x in snapped]
     if "boxes" in df.columns:
         b = pd.to_numeric(df["boxes"], errors="coerce")

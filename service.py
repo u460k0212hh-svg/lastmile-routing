@@ -6,11 +6,38 @@ import pandas as pd
 import networkx as nx
 
 from dijkstra import distance_matrix
-from cvrp import run_all, route_cost, savings, improve_routes
+from cvrp import run_all, route_cost, savings, improve_routes, check
+from dijkstra import haversine
 
 BASELINE = "기준(구역 분할)"
+MAX_SNAP_M = 300   # 업로드 좌표가 가장 가까운 교차로에서 이보다 멀면 거부
 VEH_COLORS = ["#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4", "#42d4f4",
               "#f032e6", "#9a6324", "#469990", "#000075", "#808000", "#800000"]
+
+
+def prepare_network(G, depot_latlon=None):
+    """도로망에서 왕복 가능한 가장 큰 영역만 남기고, 터미널 교차로를 정한다.
+    depot_latlon이 없으면 지역 중심에서 가장 가까운 교차로를 '임시 터미널'로 쓴다.
+    반환: (G, 터미널 교차로, 터미널에서 교차로까지 거리 m, 임시 여부)"""
+    import osmnx as ox
+    try:
+        G = ox.truncate.largest_component(G, strongly=True)
+    except AttributeError:
+        G = ox.utils_graph.get_largest_component(G, strongly=True)
+    temp = depot_latlon is None
+    if temp:
+        ys = [d["y"] for _, d in G.nodes(data=True)]
+        xs = [d["x"] for _, d in G.nodes(data=True)]
+        depot_latlon = (sum(ys) / len(ys), sum(xs) / len(xs))
+    node = int(ox.distance.nearest_nodes(G, X=depot_latlon[1], Y=depot_latlon[0]))
+    snap = haversine(depot_latlon[0], depot_latlon[1], G.nodes[node]["y"], G.nodes[node]["x"])
+    return G, node, snap, temp
+
+
+def download_network(query):
+    """OpenStreetMap에서 지역 차도 도로망을 내려받는다 (수십 초~1분 이상 걸릴 수 있음)"""
+    import osmnx as ox
+    return ox.graph_from_place(query, network_type="drive")
 
 
 def random_scenario(G, adj, depot, n_points, dmin, dmax, seed):
@@ -27,9 +54,24 @@ def upload_scenario(G, adj, depot, df):
     df = df.rename(columns=str.lower)
     if not {"lat", "lon"} <= set(df.columns):
         raise ValueError("CSV에 lat, lon 열이 있어야 합니다")
-    snapped = ox.distance.nearest_nodes(G, X=df["lon"].astype(float).tolist(), Y=df["lat"].astype(float).tolist())
+    lat = pd.to_numeric(df["lat"], errors="coerce")
+    lon = pd.to_numeric(df["lon"], errors="coerce")
+    if lat.isna().any() or lon.isna().any():
+        raise ValueError("lat, lon에 숫자가 아닌 값이 있습니다")
+    snapped = ox.distance.nearest_nodes(G, X=lon.tolist(), Y=lat.tolist())
+    far = [i + 1 for i, (y, x, n) in enumerate(zip(lat, lon, snapped))
+           if haversine(y, x, G.nodes[n]["y"], G.nodes[n]["x"]) > MAX_SNAP_M]
+    if far:
+        raise ValueError(f"도로망에서 {MAX_SNAP_M}m 넘게 떨어진 좌표가 있습니다 (CSV {far[:10]}번째 행). "
+                         "미추홀구 안의 좌표인지 확인하세요")
     nodes = [depot] + [int(x) for x in snapped]
-    boxes = df["boxes"].astype(int).tolist() if "boxes" in df.columns else [1] * len(df)
+    if "boxes" in df.columns:
+        b = pd.to_numeric(df["boxes"], errors="coerce")
+        if b.isna().any() or (b < 1).any() or (b % 1 != 0).any():
+            raise ValueError("boxes는 1 이상의 정수여야 합니다")
+        boxes = b.astype(int).tolist()
+    else:
+        boxes = [1] * len(df)
     names = df["name"].astype(str).tolist() if "name" in df.columns else [f"배송지 {i}" for i in range(1, len(df) + 1)]
     return _finish(G, adj, nodes, [0] + boxes, names)
 
@@ -54,6 +96,12 @@ def solve(sc, capacity, use_ortools, ortools_seconds):
             res["OR-Tools(비교 기준)"] = (routes, sum(route_cost(r, sc["M"]) for r in routes), sec)
         except Exception as e:
             warn = f"OR-Tools 비교를 실행하지 못했습니다: {e}"
+    # 화면에 보여주기 전에 모든 계획의 유효성 검사 (누락·중복 방문, 용량 초과, 출발·복귀)
+    for name, (routes, _, _) in res.items():
+        try:
+            check(routes, sc["demand"], capacity, len(sc["nodes"]))
+        except AssertionError as e:
+            raise ValueError(f"'{name}' 결과가 유효성 검사를 통과하지 못했습니다: {e}")
     return res, warn
 
 
@@ -77,9 +125,9 @@ def compare_table(res, sc):
     for name, (routes, d, sec) in res.items():
         lens = [route_cost(r, M) / 1000 for r in routes]
         rows.append({"방식": name, "차량 수": len(routes), "총 거리(km)": round(d / 1000, 2),
-                     "기준 대비 감소(%)": round((1 - d / base) * 100, 1),
-                     "기사 간 거리 편차(km)": round(max(lens) - min(lens), 2),
-                     "계산 시간(초)": round(sec, 3)})
+                     "구역 분할 대비 감소(%)": round((1 - d / base) * 100, 1),
+                     "최장–최단 경로 차이(km)": round(max(lens) - min(lens), 2),
+                     "경로 계산 시간(초)": sec})
     return pd.DataFrame(rows)
 
 
@@ -140,7 +188,7 @@ def capacity_analysis(sc, capacities):
             continue
         routes = improve_routes(savings(M, dem, cap), M)
         lens = [route_cost(r, M) / 1000 for r in routes]
-        rows.append({"차량 용량(박스)": cap, "필요 차량 수": len(routes),
+        rows.append({"차량 용량(박스)": cap, "사용 차량 수": len(routes),
                      "총 거리(km)": round(sum(lens), 2), "가장 긴 경로(km)": round(max(lens), 2),
                      "차량 1대당 평균 거리(km)": round(sum(lens) / len(routes), 2)})
     return pd.DataFrame(rows)

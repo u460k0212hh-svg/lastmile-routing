@@ -18,13 +18,21 @@ from basemap import make_map, add_road_background
 from dijkstra import build_adjacency, dijkstra, distance_matrix, haversine
 
 # ---------------- 설정 ----------------
-PLACE = "Michuhol-gu, Incheon, South Korea"   # 지역 바꾸려면 여기만 수정
-FALLBACK_CENTER = (37.4505, 126.6536)          # 지명 검색 실패 시 사용할 중심점(인하대 부근)
+# 지역·터미널은 regions.py에서 관리. 실행: python step1_network.py [지역키]  (기본: michuhol)
+import sys
+from regions import PRESETS
+REGION = sys.argv[1] if len(sys.argv) > 1 else "michuhol"
+CFG = PRESETS[REGION]
+PLACE = CFG["place"]
+DEPOT = CFG["depot"]          # 미추홀구: CJ대한통운 택배 남동A터미널, 학익동 587-190 (Plus Code CJQX+J8)
+                              # 이전 실험(data_old_inha)은 인하대 인근 임의 좌표 (37.4505, 126.6536)
+if DEPOT is None:
+    raise SystemExit(f"regions.py에서 {REGION}의 터미널 좌표(depot)를 먼저 입력하세요.")
+FALLBACK_CENTER = DEPOT
 FALLBACK_RADIUS = 3000                          # m
-DEPOT = (37.4505, 126.6536)                     # 출발점(택배 터미널) 좌표 - 실제 터미널 좌표로 바꿔도 됨
 N_POINTS = 50                                   # 배송지 개수
 SEED = 42                                       # 같은 숫자면 항상 같은 배송지가 나옴
-OUT = "data"
+OUT = CFG["data"]
 # --------------------------------------
 
 
@@ -60,6 +68,10 @@ def main():
 
     # 출발점과 배송지를 도로망 위의 교차로에 맞춘다
     depot_node = ox.distance.nearest_nodes(G, X=DEPOT[1], Y=DEPOT[0])
+    snap = haversine(DEPOT[0], DEPOT[1], G.nodes[depot_node]["y"], G.nodes[depot_node]["x"])
+    print(f"터미널 좌표 -> 가장 가까운 교차로까지 직선 {snap:.0f}m")
+    if snap > 300:
+        print("[주의] 터미널이 도로망 교차로에서 300m 이상 떨어져 있습니다. 위치를 확인하세요.")
     random.seed(SEED)
     candidates = [n for n in G.nodes if n != depot_node]
     stops = random.sample(candidates, N_POINTS)
@@ -120,7 +132,7 @@ def main():
                                 tooltip=f"배송지 {r.id}").add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
     m.save(os.path.join(OUT, "step1_map.html"))
-    print("\n지도 저장: data/step1_map.html (더블클릭하면 브라우저에서 열림)")
+    print(f"\n지도 저장: {OUT}/step1_map.html (더블클릭하면 브라우저에서 열림)")
 
 
 if __name__ == "__main__":
